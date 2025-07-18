@@ -1,103 +1,121 @@
-const socket = io();
+const express = require('express');
+const socket = require('socket.io');
+const http = require('http');
+const { Chess } = require('chess.js');
+const path = require('path');
+
+const app = express();
+const server = http.createServer(app);
+const io = socket(server, {
+  cors: {
+    origin: "*", // You can restrict this to your domain for production
+    methods: ["GET", "POST"]
+  }
+});
+
+app.set("view engine", "ejs");
+app.use(express.static(path.join(__dirname, 'public')));
+
 const chess = new Chess();
-const boardElement = document.querySelector(".chessboard");
+let players = { white: null, black: null };
+let playerNames = {}; // Store socket.id → name
 
-let draggedPiece = null;
-let sourceSquare = null;
-let playerRole = null;
+app.get('/', (req, res) => {
+  res.render("index", { title: "Chess Game" });
+});
 
-const getPieceUnicode = (piece) => {
-  const pieces = {
-    p: '♟', r: '♜', n: '♞', b: '♝', q: '♛', k: '♚',
-    P: '♙', R: '♖', N: '♘', B: '♗', Q: '♕', K: '♔'
-  };
-  const key = piece.color === 'w' ? piece.type.toUpperCase() : piece.type.toLowerCase();
-  return pieces[key];
-};
+io.on("connection", (socket) => {
+  console.log(`User connected: ${socket.id}`);
 
-const renderBoard = () => {
-  const board = chess.board();
-  boardElement.innerHTML = '';
+  socket.on('setName', (name) => {
+    playerNames[socket.id] = name;
 
-  board.forEach((row, rowIndex) => {
-    row.forEach((square, colIndex) => {
-      const squareElement = document.createElement("div");
-      squareElement.classList.add(
-        "square",
-        (rowIndex + colIndex) % 2 === 0 ? "light" : "dark"
-      );
-      squareElement.dataset.row = rowIndex;
-      squareElement.dataset.col = colIndex;
+    // Assign player roles
+    if (!players.white) {
+      players.white = socket.id;
+      socket.emit("player", { color: "w", name });
+    } else if (!players.black) {
+      players.black = socket.id;
+      socket.emit("player", { color: "b", name });
+    } else {
+      socket.emit("spectatorrole");
+    }
 
-      if (square) {
-        const pieceElement = document.createElement("div");
-        pieceElement.classList.add("piece", square.color === 'w' ? "white" : "black");
-        pieceElement.innerText = getPieceUnicode(square);
-        pieceElement.draggable = true;
-
-        pieceElement.addEventListener("dragstart", (e) => {
-          if ((playerRole === 'w' && square.color === 'w') ||
-              (playerRole === 'b' && square.color === 'b')) {
-            draggedPiece = pieceElement;
-            sourceSquare = { row: rowIndex, col: colIndex };
-          } else {
-            e.preventDefault(); // prevent dragging opponent's piece
-          }
-        });
-
-        squareElement.appendChild(pieceElement);
-      }
-
-      squareElement.addEventListener("dragover", (e) => e.preventDefault());
-
-      squareElement.addEventListener("drop", () => {
-        if (draggedPiece && sourceSquare) {
-          const target = { row: rowIndex, col: colIndex };
-          const source = String.fromCharCode(97 + sourceSquare.col) + (8 - sourceSquare.row);
-          const destination = String.fromCharCode(97 + target.col) + (8 - target.row);
-          const move = { from: source, to: destination, promotion: 'q' };
-
-          socket.emit("move", move);
-          draggedPiece = null;
-          sourceSquare = null;
-        }
-      });
-
-      boardElement.appendChild(squareElement);
+    // Broadcast both player names
+    io.emit("playerNames", {
+      white: players.white ? playerNames[players.white] : null,
+      black: players.black ? playerNames[players.black] : null,
     });
   });
-};
 
-socket.on("player", (role) => {
-  playerRole = role;
-  alert(`You are playing as ${role === 'w' ? "White" : "Black"}`);
+  // Send current board
+  socket.emit("boardState", chess.fen());
+
+  socket.on("move", (move) => {
+    try {
+      const playerColor = socket.id === players.white ? 'w' : socket.id === players.black ? 'b' : null;
+
+      if (!playerColor || chess.turn() !== playerColor) {
+        return socket.emit("invalidMove", { reason: "Not your turn" });
+      }
+
+      const result = chess.move(move);
+      if (result) {
+        io.emit("move", move);
+        io.emit("boardState", chess.fen());
+
+        if (chess.game_over()) {
+          let status = "Game Over";
+          if (chess.in_checkmate()) {
+            status = `${playerColor === 'w' ? 'White' : 'Black'} wins by checkmate`;
+          } else if (chess.in_stalemate()) {
+            status = "Draw by stalemate";
+          } else if (chess.in_draw()) {
+            status = "Draw";
+          } else if (chess.insufficient_material()) {
+            status = "Draw by insufficient material";
+          }
+          io.emit("gameOver", status);
+        }
+      } else {
+        socket.emit("invalidMove", { reason: "Illegal move" });
+      }
+    } catch (error) {
+      console.error(error);
+      socket.emit("invalidMove", { reason: "Server error" });
+    }
+  });
+
+  socket.on("restart", () => {
+    if (socket.id === players.white || socket.id === players.black) {
+      chess.reset();
+      io.emit("boardState", chess.fen());
+      io.emit("restart");
+    }
+  });
+
+  socket.on("disconnect", () => {
+    console.log(`User disconnected: ${socket.id}`);
+    if (socket.id === players.white) {
+      players.white = null;
+      io.emit("playerLeft", "white");
+    } else if (socket.id === players.black) {
+      players.black = null;
+      io.emit("playerLeft", "black");
+    }
+
+    delete playerNames[socket.id];
+
+    // Update player names after disconnect
+    io.emit("playerNames", {
+      white: players.white ? playerNames[players.white] : null,
+      black: players.black ? playerNames[players.black] : null,
+    });
+  });
 });
 
-socket.on("boardState", (fen) => {
-  chess.load(fen);
-  renderBoard();
+// ✅ This allows Render, Railway, etc., to set the port
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });
-
-socket.on("move", (move) => {
-  chess.move(move);
-  renderBoard();
-});
-
-socket.on("invalidMove", (data) => {
-  alert("Invalid move: " + (data.reason || "unknown error"));
-});
-
-socket.on("gameOver", (result) => {
-  alert(result);
-});
-
-socket.on("restart", () => {
-  chess.reset();
-  renderBoard();
-});
-
-socket.on("playerLeft", (color) => {
-  alert(`Player playing ${color} left the game.`);
-});
-
-renderBoard();
