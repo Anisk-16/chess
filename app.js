@@ -32,25 +32,34 @@ io.on("connection", (socket) => {
     socket.emit("spectatorrole");
   }
 
-  // Send current board to new player/spectator
+  // Send current board state
   socket.emit("boardState", chess.fen());
 
+  // Handle move
   socket.on("move", (move) => {
     try {
+      console.log("Received move:", move);
+
       const playerColor = socket.id === players.white ? 'w' : socket.id === players.black ? 'b' : null;
 
       if (!playerColor || chess.turn() !== playerColor) {
         return socket.emit("invalidMove", { reason: "Not your turn" });
       }
 
+      // Validate move structure
+      if (!move || typeof move !== "object" || !move.from || !move.to) {
+        return socket.emit("invalidMove", { reason: "Malformed move data" });
+      }
+
       const result = chess.move(move);
+
       if (result) {
         io.emit("move", move);
         io.emit("boardState", chess.fen());
 
-        if (chess.game_over()) {
+        if (chess.isGameOver()) {
           let status = "Game Over";
-          if (chess.in_checkmate()) {
+          if (chess.isCheckmate()) {
             status = `${playerColor === 'w' ? 'White' : 'Black'} wins by checkmate`;
           } else if (chess.in_stalemate()) {
             status = "Draw by stalemate";
@@ -65,11 +74,12 @@ io.on("connection", (socket) => {
         socket.emit("invalidMove", { reason: "Illegal move" });
       }
     } catch (error) {
-      console.error(error);
-      socket.emit("invalidMove", { reason: "Server error" });
+      console.error("Error during move:", error);
+      socket.emit("invalidMove", { reason: error.message || "Server error" });
     }
   });
 
+  // Handle disconnect
   socket.on("disconnect", () => {
     console.log(`User disconnected: ${socket.id}`);
     if (socket.id === players.white) {
@@ -81,7 +91,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Restart request
+  // Handle restart
   socket.on("restart", () => {
     if (socket.id === players.white || socket.id === players.black) {
       chess.reset();
@@ -91,6 +101,7 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(3000, () => {
-  console.log("Server is running on port 3000");
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });
